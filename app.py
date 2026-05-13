@@ -248,7 +248,7 @@ def extract_boe(text):
 
     return {
         "Invoice No": find(text, r"(GGL\d+[A-Z0-9]*)"),
-        "Invoice Date": find(text, r"Submission\s+(\d{2}-[A-Z]{3}-\d{2})"),
+        "Inwarding Date": find(text, r"Submission\s+(\d{2}-[A-Z]{3}-\d{2})"),
         "BOE No": find(text, r"INDEL\d*\s+(\d{6,12})\s+\d{2}/\d{2}/\d{4}"),
         "BOE Date": find(text, r"INDEL\d*\s+\d{6,12}\s+(\d{2}/\d{2}/\d{4})"),
         "Currency": find(text, r"GGL\d+[A-Z0-9]*\s+[0-9]+(?:\.[0-9]{1,2})?\s+([A-Z]{3})"),
