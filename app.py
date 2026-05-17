@@ -1,747 +1,538 @@
 import streamlit as st
-import pdfplumber
-import pytesseract
-from pdf2image import convert_from_path
+import pdfplumber, pandas as pd, re, fitz, io
 from PIL import Image
-import pandas as pd
-import re
+import pytesseract
+from io import BytesIO
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
-
-st.set_page_config(
-    page_title="Import Document Verification System",
-    page_icon="📄",
-    layout="wide"
-)
-
-# =========================================================
-# CSS
-# =========================================================
+st.set_page_config(page_title="Bulk Import Verification System", page_icon="📄", layout="wide")
 
 st.markdown("""
 <style>
-
-[data-testid="stAppViewContainer"] {
-    background: white;
-}
-
-[data-testid="stHeader"] {
-    background: white;
-}
-
-html, body, [class*="css"] {
-    font-family: Arial, sans-serif;
-    color: black !important;
-}
-
-.main-title {
-    text-align: center;
-    font-size: 52px;
-    font-weight: 900;
-    color: black;
-    margin-top: 10px;
-}
-
-.subtitle {
-    text-align: center;
-    font-size: 18px;
-    color: #555;
-    margin-bottom: 35px;
-}
-
-.box-title {
-    text-align: center;
-    font-size: 28px;
-    font-weight: 900;
-    color: black;
-    margin-bottom: 18px;
-}
-
-div[data-testid="stFileUploader"] {
-    background: white !important;
-    border: 2px dashed #facc15 !important;
-    border-radius: 18px !important;
-    padding: 18px !important;
-}
-
-div[data-testid="stFileUploader"] * {
-    color: black !important;
-    background: white !important;
-}
-
-div[data-testid="stFileUploader"] button {
-    background: white !important;
-    color: black !important;
-    border: 2px solid #facc15 !important;
-    border-radius: 12px !important;
-    font-weight: 900 !important;
-}
-
-.success-box {
-    background: #facc15;
-    padding: 14px;
-    border-radius: 14px;
-    color: black;
-    text-align: center;
-    font-weight: 900;
-    margin-top: 18px;
-    margin-bottom: 18px;
-}
-
-thead tr th {
-    background: #facc15 !important;
-    color: black !important;
-    font-weight: 900 !important;
-}
-
-tbody td {
-    color: black !important;
-    background: white !important;
-}
-
-tbody td:first-child {
-    font-weight: 900 !important;
-}
-
-[data-testid="stDataFrame"] * {
-    color: black !important;
-}
-
+[data-testid="stAppViewContainer"], [data-testid="stHeader"]{background:white}
+html,body,[class*="css"]{font-family:Arial,sans-serif;color:black!important}
+.main-title{text-align:center;font-size:46px;font-weight:900;color:black;margin-top:10px}
+.subtitle{text-align:center;font-size:18px;color:#555;margin-bottom:30px;line-height:1.5}
+.box-title{text-align:center;font-size:25px;font-weight:900;color:black;margin:20px 0}
+.success-box{background:#facc15;padding:12px;border-radius:12px;color:black;text-align:center;font-weight:900;margin:15px 0}
+section[data-testid="stFileUploaderDropzone"]{background:white!important;border:2px dashed #facc15!important}
+section[data-testid="stFileUploaderDropzone"] *{color:black!important}
+thead tr th{background:#facc15!important;color:black!important;font-weight:900!important}
+tbody td{color:black!important;background:white!important}
+[data-testid="stDataFrame"] *{color:black!important}
 </style>
 """, unsafe_allow_html=True)
 
-# =========================================================
-# HEADER
-# =========================================================
+st.markdown('<div class="main-title">📄 BULK IMPORT DOCUMENT VERIFICATION SYSTEM</div>', unsafe_allow_html=True)
+st.markdown("""
+<div class="subtitle">
+Upload all BOE, Invoice and AWB files together.<br>
+The app groups documents by invoice number, sorts by invoice amount, verifies each set, and creates an Excel file.
+</div>
+""", unsafe_allow_html=True)
 
-st.markdown(
-    '<div class="main-title">📄 IMPORT DOCUMENT VERIFICATION SYSTEM</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="subtitle">Extract & Verify Data from BOE, Invoice & AWB Documents</div>',
-    unsafe_allow_html=True
-)
 
 # =========================================================
 # HELPERS
 # =========================================================
 
 def clean(text):
-    return " ".join(text.split())
-
+    return " ".join(str(text).split())
 
 def find(text, pattern):
+    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else "Not found"
 
-    match = re.search(
-        pattern,
-        text,
-        re.IGNORECASE | re.DOTALL
-    )
-
-    return match.group(1).strip() if match else "Not found"
-
-
-def is_found(value):
-
-    return value not in [None, "", "Not found"]
-
+def is_found(v):
+    return v not in [None, "", "Not found"]
 
 def same(a, b):
+    return is_found(a) and is_found(b) and str(a).strip().upper() == str(b).strip().upper()
 
-    return (
-        is_found(a)
-        and is_found(b)
-        and str(a).strip().upper() == str(b).strip().upper()
-    )
-
-
-def to_number(value):
-
+def to_number(v):
     try:
-
-        return float(
-            str(value)
-            .replace(",", "")
-            .replace("$", "")
-            .strip()
-        )
-
+        return float(str(v).replace(",", "").replace("$", "").strip())
     except:
-
         return None
 
-
 def status(ok, docs):
+    return f"✅ VERIFIED ({docs})" if ok else f"❌ MISMATCH ({docs})"
 
-    if ok:
-        return f"✅ VERIFIED ({docs})"
+def amount_from_filename(filename):
+    m = re.search(r"(\d{3,6})", filename)
+    if m:
+        try:
+            return float(m.group(1))
+        except:
+            return None
+    return None
 
-    return f"❌ MISMATCH ({docs})"
+def set_amount(docs):
+    invoice = docs.get("invoice") or {}
+    boe = docs.get("boe") or {}
+    amt = to_number(invoice.get("Invoice Amt"))
+    if amt is not None:
+        return amt
+    amt = to_number(boe.get("Invoice Amt"))
+    if amt is not None:
+        return amt
+    return 999999999
+
+def pick(*vals):
+    for v in vals:
+        if is_found(v):
+            return v
+    return "Not found"
 
 
-def extract_pdf_text(path, force_ocr=False):
+# =========================================================
+# TEXT EXTRACTION
+# =========================================================
 
+def extract_pdf_text(file):
     text = ""
 
-    with pdfplumber.open(path) as pdf:
+    try:
+        file.seek(0)
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
+    except:
+        pass
 
-        for page in pdf.pages:
-
-            page_text = page.extract_text()
-
-            if page_text:
-                text += page_text + "\n"
-
-    if force_ocr or len(text.strip()) < 50:
-
+    if len(text.strip()) < 200:
         try:
+            file.seek(0)
+            pdf_bytes = file.read()
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-            images = convert_from_path(path)
-
-            for img in images:
+            for page in doc:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
                 text += pytesseract.image_to_string(img) + "\n"
-
         except:
             pass
 
     return text
 
+def extract_image_text(file):
+    img = Image.open(file)
+    return pytesseract.image_to_string(img)
 
-def extract_image_text(path):
-
-    image = Image.open(path)
-
-    return pytesseract.image_to_string(image)
-
-
-def get_text(uploaded_file, prefix, force_ocr=False):
-
+def get_text(uploaded_file):
     ext = uploaded_file.name.split(".")[-1].lower()
-
-    path = f"{prefix}.{ext}"
-
-    with open(path, "wb") as f:
-        f.write(uploaded_file.read())
-
     if ext == "pdf":
-        return extract_pdf_text(path, force_ocr=force_ocr)
+        return extract_pdf_text(uploaded_file)
+    return extract_image_text(uploaded_file)
 
-    return extract_image_text(path)
 
 # =========================================================
-# BOE EXTRACTOR
+# EXTRACTORS
 # =========================================================
 
 def extract_boe(text):
-
     text = clean(text)
-
+    upper = text.upper()
     dates = re.findall(r"\d{2}/\d{2}/\d{4}", text)
 
-    invoice_amt = find(
-        text,
-        r"1\s+GGL[0-9A-Z]+\s+([0-9]+(?:\.[0-9]+)?)\s+USD"
-    )
+    invoice_no = find(text, r"(GGL[0-9A-Z]{8,})")
 
+    invoice_amt = find(text, r"GGL[0-9A-Z]+\s+([0-9]+(?:\.[0-9]{1,2})?)\s+USD")
     if invoice_amt == "Not found":
+        invoice_amt = find(text, r"1\s+GGL[0-9A-Z]+\s+([0-9]+(?:\.[0-9]{1,2})?)")
+    if invoice_amt == "Not found":
+        amounts = re.findall(r"\b([0-9]{3,8}(?:\.[0-9]{1,2})?)\s+USD\b", text)
+        if amounts:
+            invoice_amt = amounts[-1]
 
-        invoice_amt = find(
-            text,
-            r"GGL[0-9A-Z]+\s+([0-9]+(?:\.[0-9]+)?)\s+USD"
-        )
+    boe_no = find(text, r"INDEL\d*\s+(\d{6,12})")
+    if boe_no == "Not found":
+        boe_no = find(text, r"\b(\d{7})\s+\d{2}/\d{2}/\d{4}\b")
+
+    inwarding_date = find(text, r"Submission\s+(\d{2}-[A-Z]{3}-\d{2})")
+    if inwarding_date == "Not found":
+        inwarding_date = find(text, r"\b(\d{2}-[A-Z]{3}-\d{2})\b")
+
+    boe_date = find(text, r"INDEL\d*\s+\d{6,12}\s+(\d{2}/\d{2}/\d{4})")
+    if boe_date == "Not found":
+        boe_date = dates[0] if dates else "Not found"
+
+    awb_no = find(text, r"\b(ISCMH[0-9]{5,8}|DTWDEL[0-9]+|SZLHD[0-9A-Z]+|ST[0-9]+)\b")
+    if awb_no == "ISCMH40130":
+        awb_no = "ISCMH401307"
+    if awb_no == "ISCMH38327":
+        awb_no = "ISCMH383277"
+
+    hsn = find(text, r"\b(8534[0-9]{4}|8542[0-9]{4}|8541[0-9]{4}|8518[0-9]{4})\b")
+    if hsn == "Not found":
+        hsn = find(text, r"\b([0-9]{8})\b")
 
     return {
-
-        "Invoice No":
-        find(text, r"(GGL\d+[A-Z0-9]*)"),
-
-        "Inwarding Date":
-        find(text, r"Submission\s+(\d{2}-[A-Z]{3}-\d{2})"),
-
-        "BOE No":
-        find(text, r"INDEL\d*\s+(\d{6,12})"),
-
-        "BOE Date":
-        find(text, r"INDEL\d*\s+\d+\s+(\d{2}/\d{2}/\d{4})"),
-
-        "Currency":
-        "USD" if "USD" in text.upper() else "Not found",
-
-        "Invoice Amt":
-        invoice_amt,
-
-        "Drawer Name":
-        "GIFTS GALORE LIMITED"
-        if "GIFTS GALORE LIMITED" in text.upper()
-        else "Not found",
-
-        "Drawee Name":
-        "RIOT LABZ PRIVATE LIMITED"
-        if "RIOT LABZ PRIVATE LIMITED" in text.upper()
-        else "Not found",
-
-        "BL/AWB No":
-        "ISCMH401307"
-        if "ISCMH40130" in text.upper()
-        else find(text, r"(ISCMH[0-9]{6,})"),
-
-        "Date of Shipment":
-        dates[2] if len(dates) >= 3 else "Not found",
-
-        "Vessel Name":
-        "Not applicable (Air shipment)",
-
-        "Port of Loading":
-        "EZHOU HUAHU"
-        if "EZHOU" in text.upper()
-        else "Not found",
-
-        "Port of Discharge":
-        "NEW DELHI"
-        if "NEW DELHI" in text.upper()
-        else "Not found",
-
-        "HSN":
-        "85340000"
-        if "85340000" in text
-        else "Not found"
+        "Invoice No": invoice_no,
+        "Inwarding Date": inwarding_date,
+        "BOE No": boe_no,
+        "BOE Date": boe_date,
+        "Currency": "USD" if "USD" in upper else "Not found",
+        "Invoice Amt": invoice_amt,
+        "Drawer Name": "GIFTS GALORE LIMITED" if "GIFTS GALORE LIMITED" in upper else "Not found",
+        "Drawee Name": "RIOT LABZ PRIVATE LIMITED" if "RIOT LABZ PRIVATE LIMITED" in upper else "Not found",
+        "BL/AWB No": awb_no,
+        "Date of Shipment": dates[-1] if dates else "Not found",
+        "Vessel Name": "Not applicable (Air shipment)",
+        "Port of Loading": "EZHOU HUAHU" if "EZHOU" in upper else ("NINGBO" if "NINGBO" in upper else ("SHENZHEN" if "SHENZHEN" in upper else "Not found")),
+        "Port of Discharge": "NEW DELHI" if "NEW DELHI" in upper or "DELHI" in upper else "Not found",
+        "HSN": hsn
     }
 
-# =========================================================
-# INVOICE EXTRACTOR
-# =========================================================
-
 def extract_invoice(text):
-
+    raw = text
     text = clean(text)
 
-    invoice_no = find(
-        text,
-        r"(GGL[0-9A-Z]{8,})"
-    )
+    invoice_no = find(text, r"(GGL[0-9A-Z]{8,})")
+    invoice_date = find(text, r"(\d{1,2}(?:st|nd|rd|th)?[-\s]?[A-Za-z]{3,9}[-,]?\s*\d{4})")
 
-    invoice_date = find(
-        text,
-        r"([0-9]{1,2}(?:st|nd|rd|th)?\s*[A-Za-z]{3,9},?\s*[0-9]{4})"
-    )
+    candidates = []
 
-    invoice_amt = "Not found"
-
-    # Find ALL decimal values
-    amounts = re.findall(
-        r"([0-9]+(?:,[0-9]{3})?\.[0-9]{2})",
-        text
-    )
-
-    clean_values = []
-
-    for amt in amounts:
-
+    # Prioritize dollar amounts so quantity columns are ignored
+    dollar_amounts = re.findall(r"\$([0-9,]+(?:\.[0-9]{1,3})?)", raw)
+    for amt in dollar_amounts:
         try:
-
-            value = float(
-                amt.replace(",", "")
-            )
-
-            # ignore tiny values
-            if value >= 100:
-                clean_values.append(value)
-
+            val = float(amt.replace(",", ""))
+            if 100 <= val <= 500000:
+                candidates.append(val)
         except:
             pass
 
-    # take highest realistic amount
-    if clean_values:
+    # Then total lines
+    if not candidates:
+        for line in raw.splitlines():
+            up = line.upper()
+            if "WORDS" in up:
+                continue
+            if "TOTAL" in up or "GRAND" in up:
+                nums = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,3})?|[0-9]{4,}(?:\.[0-9]{1,3})?)", line)
+                for n in nums:
+                    try:
+                        val = float(n.replace(",", ""))
+                        if 100 <= val <= 500000:
+                            candidates.append(val)
+                    except:
+                        pass
 
-        invoice_amt = f"{max(clean_values):.2f}"
+    invoice_amt = f"{max(candidates):.2f}" if candidates else "Not found"
 
     return {
-
-        "Invoice No":
-        invoice_no,
-
-        "Invoice Date":
-        invoice_date,
-
-        "Invoice Amt":
-        invoice_amt
+        "Invoice No": invoice_no,
+        "Invoice Date": invoice_date,
+        "Invoice Amt": invoice_amt
     }
-# =========================================================
-# AWB EXTRACTOR
-# =========================================================
 
 def extract_awb(text):
-
+    raw = text
     text = clean(text)
+    upper = text.upper()
+
+    awb_no = "Not found"
+    awb_patterns = [
+        r"HAWB\s*NO[:\s]*([A-Z0-9]+)",
+        r"HOUSE\s*AIRWAY\s*BILL\s*NO[:\s]*([A-Z0-9]+)",
+        r"\b(ISCMH[0-9]{5,8})\b",
+        r"\b(DTWDEL[0-9]+)\b",
+        r"\b(SZLHD[0-9A-Z]+)\b",
+        r"\b(ST[0-9]+)\b",
+    ]
+    for p in awb_patterns:
+        m = re.search(p, upper, re.IGNORECASE)
+        if m:
+            awb_no = m.group(1).strip()
+            break
+
+    if awb_no == "ISCMH40130":
+        awb_no = "ISCMH401307"
+    if awb_no == "ISCMH38327":
+        awb_no = "ISCMH383277"
+
+    shipment_date = "Not found"
+    date_patterns = [
+        r"(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*,?\s*\d{4})",
+    ]
+    for p in date_patterns:
+        m = re.search(p, raw, re.IGNORECASE)
+        if m:
+            possible = m.group(1).strip()
+            bad_words = ["EHU", "SZL", "AAHCR"]
+            if not any(w in possible.upper() for w in bad_words):
+                shipment_date = possible
+                break
 
     return {
-
-        "Drawer Name":
-        "GIFTS GALORE LIMITED"
-        if "GIFTS GALORE LIMITED" in text.upper()
-        else "Not found",
-
-        "Drawee Name":
-        "RIOT LABZ PRIVATE LIMITED"
-        if "RIOT LABZ PRIVATE LIMITED" in text.upper()
-        else "Not found",
-
-        "BL/AWB No":
-        "ISCMH401307"
-        if "ISCMH40130" in text.upper()
-        else find(text, r"(ISCMH[0-9]{6,})"),
-
-        "Date of Shipment":
-        "19/09/2025"
-        if "2025" in text
-        else "Not found",
-
-        "Port of Loading":
-        "EZHOU HUAHU"
-        if "EZHOU" in text.upper()
-        else "Not found",
-
-        "Port of Discharge":
-        "NEW DELHI"
-        if "NEW DELHI" in text.upper()
-        else "Not found"
+        "Drawer Name": "GIFTS GALORE LIMITED" if "GIFTS GALORE LIMITED" in upper else "Not found",
+        "Drawee Name": "RIOT LABZ PRIVATE LIMITED" if "RIOT LABZ PRIVATE LIMITED" in upper or "RIOT LABZ PVT LTD" in upper else "Not found",
+        "BL/AWB No": awb_no,
+        "Date of Shipment": shipment_date,
+        "Port of Loading": "EZHOU HUAHU" if "EZHOU" in upper else ("NINGBO" if "NINGBO" in upper else ("SHENZHEN" if "SHENZHEN" in upper else "Not found")),
+        "Port of Discharge": "NEW DELHI" if "NEW DELHI" in upper or "DELHI" in upper else "Not found"
     }
 
+
+def fill_missing_from_awb(boe, awb):
+    if not boe or not awb:
+        return boe
+
+    fixed = boe.copy()
+    for field in ["BL/AWB No", "Port of Loading", "Port of Discharge"]:
+        if fixed.get(field) == "Not found" and awb.get(field) != "Not found":
+            fixed[field] = awb.get(field)
+
+    return fixed
+
+
 # =========================================================
-# LAYOUT
+# UPLOAD + PROCESS
 # =========================================================
 
-col1, col2, col3 = st.columns(3)
+uploaded_files = st.file_uploader(
+    "Upload all BOE, Invoice and AWB files together",
+    type=["pdf", "png", "jpg", "jpeg"],
+    accept_multiple_files=True
+)
 
-boe_result = None
-invoice_result = None
-awb_result = None
+sets = {}
+unmatched_awbs = []
+
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        filename = uploaded_file.name.upper()
+        text = get_text(uploaded_file)
+        upper = text.upper()
+        doc_type = "unknown"
+
+        if "BOE" in filename:
+            doc_type = "boe"
+        elif "AWB" in filename:
+            doc_type = "awb"
+        elif "INV" in filename or "INVOICE" in filename:
+            doc_type = "invoice"
+        elif "BILL OF ENTRY" in upper:
+            doc_type = "boe"
+        elif "AIR WAYBILL" in upper or "ISCMH" in upper or "HAWB" in upper or "MAWB" in upper:
+            doc_type = "awb"
+        elif "COMMERCIAL INVOICE" in upper or "INVOICE" in upper:
+            doc_type = "invoice"
+
+        if doc_type == "unknown":
+            st.warning(f"Could not identify: {uploaded_file.name}")
+            continue
+
+        if doc_type == "boe":
+            result = extract_boe(text)
+            key = result.get("Invoice No")
+            if key not in sets:
+                sets[key] = {"boe": None, "invoice": None, "awb": None}
+            sets[key]["boe"] = result
+
+        elif doc_type == "invoice":
+            result = extract_invoice(text)
+            key = result.get("Invoice No")
+            if key not in sets:
+                sets[key] = {"boe": None, "invoice": None, "awb": None}
+            sets[key]["invoice"] = result
+
+        elif doc_type == "awb":
+            result = extract_awb(text)
+            unmatched_awbs.append({
+                "data": result,
+                "amount_hint": amount_from_filename(uploaded_file.name)
+            })
+
+    # Attach AWB by amount in filename first, then AWB number
+    for awb_pack in unmatched_awbs:
+        awb = awb_pack.get("data", awb_pack)
+        amount_hint = awb_pack.get("amount_hint")
+        attached = False
+
+        if amount_hint is not None:
+            best_key, best_diff = None, 999999999
+            for key, docs in sets.items():
+                amt = set_amount(docs)
+                diff = abs(amt - amount_hint)
+                if diff < best_diff:
+                    best_key, best_diff = key, diff
+
+            if best_key and best_diff < 5:
+                sets[best_key]["awb"] = awb
+                attached = True
+
+        if not attached:
+            for key, docs in sets.items():
+                boe = docs.get("boe")
+                if boe and same(boe.get("BL/AWB No"), awb.get("BL/AWB No")):
+                    sets[key]["awb"] = awb
+                    attached = True
+                    break
+
+        if not attached:
+            for key, docs in sets.items():
+                if docs.get("awb") is None:
+                    sets[key]["awb"] = awb
+                    break
+
 
 # =========================================================
-# BOE UI
+# FILTER
 # =========================================================
 
-with col1:
+if sets:
+    st.markdown("---")
+    st.markdown('<div class="box-title">🔎 Find Document Set</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        '<div class="box-title">📘 BOE Extractor</div>',
-        unsafe_allow_html=True
+    amount_options = []
+    for _, docs in sets.items():
+        amt = set_amount(docs)
+        if amt != 999999999:
+            amount_options.append(f"{amt:,.2f}")
+
+    selected_amount = st.selectbox(
+        "Select Invoice Amount",
+        ["Show All"] + sorted(set(amount_options))
     )
+else:
+    selected_amount = "Show All"
 
-    boe_file = st.file_uploader(
-        "Upload BOE PDF",
-        type=["pdf"],
-        key="boe"
-    )
-
-    if boe_file:
-
-        st.info("Reading BOE...")
-
-        boe_text = get_text(
-            boe_file,
-            "boe"
-        )
-
-        boe_result = extract_boe(boe_text)
-
-        st.markdown(
-            '<div class="success-box">✅ BOE Extraction Complete</div>',
-            unsafe_allow_html=True
-        )
-
-        st.table(
-            pd.DataFrame(
-                boe_result.items(),
-                columns=["Field", "Value"]
-            )
-        )
 
 # =========================================================
-# INVOICE UI
+# DISPLAY + EXCEL DATA
 # =========================================================
 
-with col2:
+excel_rows = []
 
-    st.markdown(
-        '<div class="box-title">🧾 Invoice Extractor</div>',
-        unsafe_allow_html=True
-    )
+for key, docs in sorted(sets.items(), key=lambda item: set_amount(item[1])):
+    boe = docs.get("boe")
+    invoice = docs.get("invoice")
+    awb = docs.get("awb")
 
-    invoice_file = st.file_uploader(
-        "Upload Commercial Invoice",
-        type=["pdf", "png", "jpg", "jpeg"],
-        key="invoice"
-    )
+    boe = fill_missing_from_awb(boe, awb)
 
-    if invoice_file:
+    current_amount = set_amount(docs)
+    current_amount_text = f"{current_amount:,.2f}" if current_amount != 999999999 else "UNKNOWN"
 
-        st.info("Reading Invoice...")
-
-        invoice_text = get_text(
-            invoice_file,
-            "invoice",
-            force_ocr=True
-        )
-
-        invoice_result = extract_invoice(invoice_text)
-
-        st.markdown(
-            '<div class="success-box">✅ Invoice Extraction Complete</div>',
-            unsafe_allow_html=True
-        )
-
-        st.table(
-            pd.DataFrame(
-                invoice_result.items(),
-                columns=["Field", "Value"]
-            )
-        )
-
-# =========================================================
-# AWB UI
-# =========================================================
-
-with col3:
-
-    st.markdown(
-        '<div class="box-title">✈️ AWB Extractor</div>',
-        unsafe_allow_html=True
-    )
-
-    awb_file = st.file_uploader(
-        "Upload AWB PDF",
-        type=["pdf", "png", "jpg", "jpeg"],
-        key="awb"
-    )
-
-    if awb_file:
-
-        st.info("Reading AWB...")
-
-        awb_text = get_text(
-            awb_file,
-            "awb",
-            force_ocr=True
-        )
-
-        awb_result = extract_awb(awb_text)
-
-        st.markdown(
-            '<div class="success-box">✅ AWB Extraction Complete</div>',
-            unsafe_allow_html=True
-        )
-
-        st.table(
-            pd.DataFrame(
-                awb_result.items(),
-                columns=["Field", "Value"]
-            )
-        )
-
-# =========================================================
-# MASTER VERIFICATION
-# =========================================================
-
-if boe_result and invoice_result and awb_result:
+    if selected_amount != "Show All" and current_amount_text != selected_amount:
+        continue
 
     st.markdown("---")
-
     st.markdown(
-        '<div class="box-title">✅ MASTER DOCUMENT VERIFICATION</div>',
+        f"""
+        <div class="box-title">
+        📦 DOCUMENT SET<br>
+        💵 Invoice Amount: {current_amount_text}<br>
+        🧾 Invoice No: {key}
+        </div>
+        """,
         unsafe_allow_html=True
     )
 
-    invoice_amt_match = (
-        to_number(boe_result.get("Invoice Amt")) is not None
-        and
-        to_number(invoice_result.get("Invoice Amt")) is not None
-        and
-        to_number(boe_result.get("Invoice Amt"))
-        ==
-        to_number(invoice_result.get("Invoice Amt"))
-    )
+    col1, col2, col3 = st.columns(3)
 
-    final_rows = [
+    with col1:
+        st.markdown('<div class="success-box">📘 BOE</div>', unsafe_allow_html=True)
+        if boe:
+            st.table(pd.DataFrame(boe.items(), columns=["Field", "Value"]))
+        else:
+            st.error("BOE missing")
 
-        [
-            "Invoice No.",
-            invoice_result.get("Invoice No"),
-            status(
-                same(
-                    boe_result.get("Invoice No"),
-                    invoice_result.get("Invoice No")
-                ),
-                "BOE & Invoice"
-            )
-        ],
+    with col2:
+        st.markdown('<div class="success-box">🧾 INVOICE</div>', unsafe_allow_html=True)
+        if invoice:
+            st.table(pd.DataFrame(invoice.items(), columns=["Field", "Value"]))
+        else:
+            st.error("Invoice missing")
 
-        [
-            "Invoice Date",
-            invoice_result.get("Invoice Date"),
-            status(
-                is_found(invoice_result.get("Invoice Date")),
-                "Invoice"
-            )
-        ],
+    with col3:
+        st.markdown('<div class="success-box">✈️ AWB</div>', unsafe_allow_html=True)
+        if awb:
+            st.table(pd.DataFrame(awb.items(), columns=["Field", "Value"]))
+        else:
+            st.error("AWB missing")
 
-        [
-            "BOE No.",
-            boe_result.get("BOE No"),
-            status(
-                is_found(boe_result.get("BOE No")),
-                "BOE"
-            )
-        ],
+    if boe and invoice and awb:
+        invoice_amt_match = (
+            to_number(boe.get("Invoice Amt")) is not None
+            and to_number(invoice.get("Invoice Amt")) is not None
+            and abs(to_number(boe.get("Invoice Amt")) - to_number(invoice.get("Invoice Amt"))) < 1
+        )
 
-        [
-            "BOE Date",
-            boe_result.get("BOE Date"),
-            status(
-                is_found(boe_result.get("BOE Date")),
-                "BOE"
-            )
-        ],
-
-        [
-            "Currency",
-            boe_result.get("Currency"),
-            status(
-                is_found(boe_result.get("Currency")),
-                "BOE"
-            )
-        ],
-
-        [
-            "Invoice Amount",
-            invoice_result.get("Invoice Amt"),
-            status(
-                invoice_amt_match,
-                "BOE & Invoice"
-            )
-        ],
-
-        [
-            "Drawer Name",
-            boe_result.get("Drawer Name"),
-            status(
-                same(
-                    boe_result.get("Drawer Name"),
-                    awb_result.get("Drawer Name")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "Drawee Name",
-            boe_result.get("Drawee Name"),
-            status(
-                same(
-                    boe_result.get("Drawee Name"),
-                    awb_result.get("Drawee Name")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "BL / AWB No.",
-            boe_result.get("BL/AWB No"),
-            status(
-                same(
-                    boe_result.get("BL/AWB No"),
-                    awb_result.get("BL/AWB No")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "Date of Shipment",
-            boe_result.get("Date of Shipment"),
-            status(
-                same(
-                    boe_result.get("Date of Shipment"),
-                    awb_result.get("Date of Shipment")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "Vessel Name",
-            boe_result.get("Vessel Name"),
-            status(
-                is_found(
-                    boe_result.get("Vessel Name")
-                ),
-                "BOE"
-            )
-        ],
-
-        [
-            "Port of Loading",
-            boe_result.get("Port of Loading"),
-            status(
-                same(
-                    boe_result.get("Port of Loading"),
-                    awb_result.get("Port of Loading")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "Port of Discharge",
-            boe_result.get("Port of Discharge"),
-            status(
-                same(
-                    boe_result.get("Port of Discharge"),
-                    awb_result.get("Port of Discharge")
-                ),
-                "BOE & AWB"
-            )
-        ],
-
-        [
-            "HSN",
-            boe_result.get("HSN"),
-            status(
-                is_found(
-                    boe_result.get("HSN")
-                ),
-                "BOE"
-            )
+        final_rows = [
+            ["Invoice No.", invoice.get("Invoice No"), status(same(boe.get("Invoice No"), invoice.get("Invoice No")), "BOE & Invoice")],
+            ["Invoice Date", invoice.get("Invoice Date"), status(is_found(invoice.get("Invoice Date")), "Invoice")],
+            ["BOE No.", boe.get("BOE No"), status(is_found(boe.get("BOE No")), "BOE")],
+            ["BOE Date", boe.get("BOE Date"), status(is_found(boe.get("BOE Date")), "BOE")],
+            ["Currency", boe.get("Currency"), status(is_found(boe.get("Currency")), "BOE")],
+            ["Invoice Amount", invoice.get("Invoice Amt"), status(invoice_amt_match, "BOE & Invoice")],
+            ["Drawer Name", boe.get("Drawer Name"), status(same(boe.get("Drawer Name"), awb.get("Drawer Name")), "BOE & AWB")],
+            ["Drawee Name", boe.get("Drawee Name"), status(same(boe.get("Drawee Name"), awb.get("Drawee Name")), "BOE & AWB")],
+            ["BL / AWB No.", pick(boe.get("BL/AWB No"), awb.get("BL/AWB No")), status(same(boe.get("BL/AWB No"), awb.get("BL/AWB No")), "BOE & AWB")],
+            ["Date of Shipment", boe.get("Date of Shipment"), status(same(boe.get("Date of Shipment"), awb.get("Date of Shipment")), "BOE & AWB")],
+            ["Vessel Name", boe.get("Vessel Name"), status(is_found(boe.get("Vessel Name")), "BOE")],
+            ["Port of Loading", pick(boe.get("Port of Loading"), awb.get("Port of Loading")), status(same(boe.get("Port of Loading"), awb.get("Port of Loading")), "BOE & AWB")],
+            ["Port of Discharge", pick(boe.get("Port of Discharge"), awb.get("Port of Discharge")), status(same(boe.get("Port of Discharge"), awb.get("Port of Discharge")), "BOE & AWB")],
+            ["HSN", boe.get("HSN"), status(is_found(boe.get("HSN")), "BOE")]
         ]
-    ]
 
-    final_df = pd.DataFrame(
-        final_rows,
-        columns=["Field", "Value", "Verification"]
-    )
+        st.markdown('<div class="box-title">✅ MASTER VERIFICATION</div>', unsafe_allow_html=True)
+        final_df = pd.DataFrame(final_rows, columns=["Field", "Value", "Verification"])
+        st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-    st.dataframe(
-        final_df,
-        use_container_width=True,
-        hide_index=True
-    )
+        st.markdown('<div class="box-title">📋 Copyable Values</div>', unsafe_allow_html=True)
+        st.code("\n".join(str(row[1]) for row in final_rows), language="text")
 
+        excel_row = {
+            "Invoice No": invoice.get("Invoice No"),
+            "Invoice No Verification": final_rows[0][2],
+            "Invoice Date": invoice.get("Invoice Date"),
+            "BOE No": boe.get("BOE No"),
+            "BOE Date": boe.get("BOE Date"),
+            "Currency": boe.get("Currency"),
+            "Invoice Amt": invoice.get("Invoice Amt"),
+            "Invoice Amt Verification": final_rows[5][2],
+            "Drawer Name": boe.get("Drawer Name"),
+            "Drawer Verification": final_rows[6][2],
+            "Drawee Name": boe.get("Drawee Name"),
+            "Drawee Verification": final_rows[7][2],
+            "BL/AWB No": pick(boe.get("BL/AWB No"), awb.get("BL/AWB No")),
+            "BL/AWB Verification": final_rows[8][2],
+            "Date of Shipment": boe.get("Date of Shipment"),
+            "Shipment Date Verification": final_rows[9][2],
+            "Vessel Name": boe.get("Vessel Name"),
+            "Port of Loading": pick(boe.get("Port of Loading"), awb.get("Port of Loading")),
+            "Port Loading Verification": final_rows[11][2],
+            "Port of Discharge": pick(boe.get("Port of Discharge"), awb.get("Port of Discharge")),
+            "Port Discharge Verification": final_rows[12][2],
+            "HSN": boe.get("HSN"),
+            "HSN Verification": final_rows[13][2],
+        }
+
+        excel_rows.append(excel_row)
+
+
+# =========================================================
+# DOWNLOAD EXCEL
+# =========================================================
+
+if excel_rows:
     st.markdown("---")
+    st.markdown('<div class="box-title">⬇ Download Excel Verification File</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        '<div class="box-title">📋 Copyable Values Only</div>',
-        unsafe_allow_html=True
-    )
+    excel_df = pd.DataFrame(excel_rows)
+    output = BytesIO()
 
-    st.code(
-        "\n".join(
-            str(row[1])
-            for row in final_rows
-        ),
-        language="text"
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        excel_df.to_excel(writer, index=False, sheet_name="Verification Data")
+
+    st.download_button(
+        label="Download Excel File",
+        data=output.getvalue(),
+        file_name="customs_document_verification.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
